@@ -1,11 +1,11 @@
 
-name: Windows RDP NRB Minecraft
+name: Windows RDP NRB Minecraft - Fast Start
 
 on:
   workflow_dispatch:
     inputs:
       restore_run_id:
-        description: "Previous workflow run ID for workspace restore (optional)"
+        description: "Previous run ID for workspace restore (optional)"
         required: false
         type: string
       keep_alive_minutes:
@@ -31,12 +31,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Set up Microsoft OpenJDK 21
-        uses: actions/setup-java@v5
-        with:
-          distribution: microsoft
-          java-version: "21"
-
       - name: Prepare workspace and restore backup
         shell: pwsh
         env:
@@ -46,26 +40,22 @@ jobs:
           $workspace = Join-Path $env:GITHUB_WORKSPACE "RDP-Workspace"
           New-Item -ItemType Directory -Path $workspace -Force | Out-Null
 
-          @"
-          Workspace files are backed up as the RDP-Workspace artifact.
-          The Windows OS and installed applications are temporary.
-          "@ | Set-Content (Join-Path $workspace "README.txt") -Encoding UTF8
-
           if ($env:RESTORE_RUN_ID -and $env:RESTORE_RUN_ID.Trim()) {
             if ($env:RESTORE_RUN_ID -notmatch '^\d+$') {
               throw "restore_run_id must contain digits only."
             }
-            gh run download $env:RESTORE_RUN_ID `
-              --repo $env:GITHUB_REPOSITORY `
-              --name RDP-Workspace `
-              --dir $workspace
-
+            gh run download $env:RESTORE_RUN_ID --repo $env:GITHUB_REPOSITORY --name RDP-Workspace --dir $workspace
             if ($LASTEXITCODE -ne 0) {
-              Write-Warning "Restore failed; continuing with workspace."
+              Write-Warning "Backup restore failed; continuing with workspace."
             }
           }
 
-      - name: Configure RDP account
+          if (-not (Test-Path (Join-Path $workspace "README.txt"))) {
+            "Workspace backup contains files only; Windows itself is temporary." |
+              Set-Content (Join-Path $workspace "README.txt") -Encoding UTF8
+          }
+
+      - name: Configure Windows RDP account
         shell: pwsh
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
@@ -73,35 +63,25 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw "Add RDP_PASSWORD in repository Actions secrets."
+            throw "Add the RDP_PASSWORD repository secret."
           }
           if ($env:RDP_PASSWORD.Length -lt 14) {
             throw "RDP_PASSWORD must be at least 14 characters."
           }
 
-          $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD -AsPlainText -Force
+          $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
 
           if (Get-LocalUser -Name "NRB" -ErrorAction SilentlyContinue) {
             Set-LocalUser -Name "NRB" -Password $securePassword
           } else {
-            New-LocalUser -Name "NRB" `
-              -Password $securePassword `
-              -Description "Temporary RDP account" `
-              -PasswordNeverExpires | Out-Null
+            New-LocalUser -Name "NRB" -Password $securePassword -Description "Temporary RDP account" -PasswordNeverExpires | Out-Null
           }
 
-          Add-LocalGroupMember -Group "Administrators" `
-            -Member "NRB" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" `
-            -Member "NRB" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "NRB" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "NRB" -ErrorAction SilentlyContinue
 
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name fDenyTSConnections -Value 0
-
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP configured for temporary runner."
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -109,24 +89,26 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           timeout: 3m
 
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: microsoft
+          java-version: "21"
+
       - name: Install Minecraft Launcher
         shell: pwsh
         continue-on-error: true
         run: |
           if (Get-Command winget -ErrorAction SilentlyContinue) {
-            winget install --id Mojang.MinecraftLauncher `
-              --exact --silent `
-              --accept-source-agreements `
-              --accept-package-agreements
-
+            winget install --id Mojang.MinecraftLauncher --exact --silent --accept-source-agreements --accept-package-agreements
             if ($LASTEXITCODE -ne 0) {
-              Write-Warning "Minecraft Launcher installation failed."
+              Write-Warning "Minecraft Launcher installation failed; continuing."
             }
           } else {
-            Write-Warning "winget unavailable; skipping installation."
+            Write-Warning "winget unavailable; skipping launcher installation."
           }
 
-      - name: Upload initial workspace backup
+      - name: Upload workspace backup
         uses: actions/upload-artifact@v5
         with:
           name: RDP-Workspace
@@ -141,8 +123,8 @@ jobs:
           Write-Host "Tailscale IPv4 address:"
           tailscale ip -4
           Write-Host "RDP username: NRB"
-          Write-Host "Use the Tailscale IP in your RDP client."
-          Write-Host "Your password is stored in RDP_PASSWORD."
+          Write-Host "Connect using the Tailscale IP."
+          Write-Host "Your password is stored in the RDP_PASSWORD secret."
 
       - name: Keep runner alive
         shell: pwsh
