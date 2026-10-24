@@ -26,6 +26,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Validate required secrets
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Missing RDP_PASSWORD repository secret."
+          }
+          if ($env:RDP_PASSWORD.Length -lt 14) {
+            throw "RDP_PASSWORD must be at least 14 characters."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Missing TS_AUTHKEY repository secret."
+          }
+          Write-Host "Required secrets are configured."
+
       - name: Prepare workspace
         shell: pwsh
         run: |
@@ -41,39 +58,46 @@ jobs:
           distribution: microsoft
           java-version: "21"
 
-      - name: Configure temporary RDP account
-        if: ${{ secrets.RDP_PASSWORD != '' }}
+      - name: Configure RDP account
         shell: pwsh
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:RDP_PASSWORD.Length -lt 14) {
-            throw "RDP_PASSWORD must be at least 14 characters."
-          }
-
           $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
           if (Get-LocalUser -Name "NRB" -ErrorAction SilentlyContinue) {
             Set-LocalUser -Name "NRB" -Password $securePassword
           } else {
-            New-LocalUser -Name "NRB" -Password $securePassword `
-              -Description "Temporary RDP account" -PasswordNeverExpires | Out-Null
+            New-LocalUser -Name "NRB" `
+              -Password $securePassword `
+              -Description "Temporary RDP account" `
+              -PasswordNeverExpires | Out-Null
           }
 
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "NRB" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" `
+            -Member "NRB" -ErrorAction SilentlyContinue
+
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name fDenyTSConnections -Value 0
+
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
       - name: Connect to Tailscale
-        if: ${{ secrets.TS_AUTHKEY != '' }}
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           timeout: 3m
 
-      - name: Set up Minecraft Launcher
+      - name: Show Tailscale IP
+        shell: pwsh
+        run: |
+          Write-Host "Tailscale IPv4 address:"
+          tailscale ip -4
+          Write-Host "RDP username: NRB"
+
+      - name: Install Minecraft Launcher
         shell: pwsh
         continue-on-error: true
         run: |
@@ -81,17 +105,8 @@ jobs:
             winget install --id Mojang.MinecraftLauncher --exact --silent `
               --accept-source-agreements --accept-package-agreements
           } else {
-            Write-Warning "winget unavailable; skipping Minecraft Launcher."
+            Write-Warning "winget unavailable; skipping Minecraft installation."
           }
-
-      - name: Show Tailscale connection details
-        if: ${{ secrets.TS_AUTHKEY != '' }}
-        shell: pwsh
-        run: |
-          Write-Host "Tailscale IPv4 address:"
-          tailscale ip -4
-          Write-Host "RDP username: NRB"
-          Write-Host "Use your RDP_PASSWORD secret to connect."
 
       - name: Upload workspace backup
         uses: actions/upload-artifact@v5
